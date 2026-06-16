@@ -48,6 +48,7 @@ static const std::vector<std::string> FORBIDDEN_SEQUENCES = {
     "\n", "\r", "\t",  // Control characters
     "\x1B",            // ANSI escape
     "$",               // $variables and command substitution $() ${}
+    " -",              // Options
     "*", "?"           // Wildcards 
 };
 
