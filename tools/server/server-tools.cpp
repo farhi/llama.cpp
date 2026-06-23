@@ -11,13 +11,66 @@
 #include <cstring>
 #include <climits>
 #include <algorithm>
+#include <cctype>  // For std::isspace
 #include <unordered_set>
 
 namespace fs = std::filesystem;
 
+std::vector<std::unique_ptr<server_tool>> parse_markdown_tools(const std::string &markdown_path);
+
 //
 // internal helpers
 //
+
+// Helper function for C++17 compatibility
+static bool string_ends_with(const std::string &str, const std::string &suffix) {
+    return str.size() >= suffix.size() &&
+           str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// Helper: Tokenize a command string into arguments (respects quotes/backslashes)
+static std::vector<std::string> tokenize_command(const std::string& cmd) {
+    std::vector<std::string> tokens;
+    std::string current;
+    bool in_single_quote = false;
+    bool in_double_quote = false;
+
+    for (size_t i = 0; i < cmd.size(); ++i) {
+        char c = cmd[i];
+
+        if (in_single_quote) {
+            if (c == '\'') in_single_quote = false;
+            else current += c;
+        }
+        else if (in_double_quote) {
+            if (c == '"') in_double_quote = false;
+            else if (c == '\\' && i + 1 < cmd.size()) {
+                current += cmd[++i];  // Consume escaped char
+            } else {
+                current += c;
+            }
+        }
+        else {
+            if (c == '\\' && i + 1 < cmd.size()) {
+                current += cmd[++i];
+            } else if (c == '\'') {
+                in_single_quote = true;
+            } else if (c == '"') {
+                in_double_quote = true;
+            } else if (std::isspace(static_cast<unsigned char>(c))) {
+                if (!current.empty()) {
+                    tokens.push_back(current);
+                    current.clear();
+                }
+            } else {
+                current += c;
+            }
+        }
+    }
+
+    if (!current.empty()) tokens.push_back(current);
+    return tokens;
+}
 
 static std::vector<char *> to_cstr_vec(const std::vector<std::string> & v) {
     std::vector<char *> r;
@@ -418,6 +471,105 @@ struct server_tool_exec_shell_command : server_tool {
     }
 };
 
+
+//
+// server_tool_markdown_command: add a tool from a MD entry
+//
+// Markdown syntax, e.g. --tools TOOLS.md:
+//
+//  **list_files**: List all files in given {directory} (command: `ls {directory}`)
+//  **grep_text**: Search for text {pattern} in {file} (command: `grep "{pattern}" {file}`)
+
+
+struct server_tool_markdown_command : server_tool {
+    std::string command_template;
+    std::string description;
+
+    server_tool_markdown_command(const std::string &name, const std::string &description, const std::string &command)
+        : command_template(command), description(description) {
+        this->name = name;
+        this->display_name = name;
+        this->permission_write = true;
+    }
+
+    json get_definition() override {
+        std::regex param_regex("\\{([^}]+)\\}");
+        std::smatch matches;
+        std::vector<std::string> parameters;
+        std::string cmd = command_template;
+        while (std::regex_search(cmd, matches, param_regex)) {
+            parameters.push_back(matches[1].str());
+            cmd = matches.suffix().str();
+        }
+
+        json param_properties;
+        for (const auto &param : parameters) {
+            param_properties[param] = {{"type", "string"}, {"description", "Input parameter: " + param}};
+        }
+
+        // Add timeout and max_output_size to the parameters
+        param_properties["timeout"] = {
+            {"type", "integer"},
+            {"description", string_format("Timeout in seconds (default 10, max %d)", SERVER_TOOL_EXEC_SHELL_COMMAND_MAX_TIMEOUT)}
+        };
+        param_properties["max_output_size"] = {
+            {"type", "integer"},
+            {"description", string_format("Maximum output size in bytes (default %zu)", SERVER_TOOL_EXEC_SHELL_COMMAND_MAX_OUTPUT_SIZE)}
+        };
+
+        return {
+            {"type", "function"},
+            {"function", {
+                {"name", name},
+                {"description", description},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", param_properties},
+                    {"required", json::array()},
+                }},
+            }},
+        };
+    }
+
+    json invoke(json params) override {
+        // Tokenize the template (e.g., "lynx -dump {URL}" → ["lynx", "-dump", "{URL}"])
+        std::vector<std::string> tokens = tokenize_command(command_template);
+
+        // Replace placeholders in each token
+        for (auto& token : tokens) {
+            for (auto it = params.begin(); it != params.end(); ++it) {
+                if (it.key() == "timeout" || it.key() == "max_output_size") continue;
+                std::string placeholder = "{" + it.key() + "}";
+                std::string value = it->get<std::string>();
+                size_t pos = 0;
+                while ((pos = token.find(placeholder, pos)) != std::string::npos) {
+                    token.replace(pos, placeholder.length(), value);
+                    pos += value.length();
+                }
+            }
+        }
+
+        // Validate tokens
+        if (tokens.empty() || tokens[0].empty()) {
+            return {{"error", "empty command or command name"}};
+        }
+
+        // Parse timeout/max_output_size
+        int timeout = json_value(params, "timeout", 10);
+        size_t max_output = (size_t)json_value(params, "max_output_size", (int)SERVER_TOOL_EXEC_SHELL_COMMAND_MAX_OUTPUT_SIZE);
+        timeout = std::min(timeout, SERVER_TOOL_EXEC_SHELL_COMMAND_MAX_TIMEOUT);
+        max_output = std::min(max_output, SERVER_TOOL_EXEC_SHELL_COMMAND_MAX_OUTPUT_SIZE);
+
+        // Execute directly (no shell wrapper)
+        auto res = run_process(tokens, max_output, timeout);
+
+        std::string text_output = res.output;
+        text_output += string_format("\n[exit code: %d]", res.exit_code);
+        if (res.timed_out) text_output += " [exit due to timeout]";
+        return {{"result", text_output}};
+    }
+};
+
 //
 // write_file: create or overwrite a file
 //
@@ -745,21 +897,88 @@ static std::vector<std::unique_ptr<server_tool>> build_tools() {
     return tools;
 }
 
+
+std::vector<std::unique_ptr<server_tool>> parse_markdown_tools(const std::string &markdown_path) {
+    std::vector<std::unique_ptr<server_tool>> tools;
+    std::ifstream file(markdown_path);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open Markdown file: " + markdown_path);
+    }
+
+    std::string line;
+    std::regex tool_regex("\\*\\*([^\\*]+)\\*\\*:\\s*(.+)\\s*\\(command:\\s*`([^`]+)`\\s*\\)");
+
+    while (std::getline(file, line)) {
+        std::smatch matches;
+        if (std::regex_search(line, matches, tool_regex)) {
+            std::string tool_name = matches[1].str();
+            std::string description = matches[2].str();
+            std::string command = matches[3].str();
+
+            tools.push_back(
+                std::make_unique<server_tool_markdown_command>(
+                    tool_name, description, command
+                )
+            );
+        }
+    }
+
+    return tools;
+}
+
 void server_tools::setup(const std::vector<std::string> & enabled_tools) {
     if (!enabled_tools.empty()) {
         std::unordered_set<std::string> enabled_set(enabled_tools.begin(), enabled_tools.end());
         auto all_tools = build_tools();
 
-        // collect all known tool names for validation
+        // Collect all known tool names (built-in only for now)
         std::vector<std::string> known_names;
         known_names.reserve(all_tools.size());
         for (const auto & t : all_tools) {
             known_names.push_back(t->name);
         }
 
-        // validate that every requested tool is known
+        // Temporary vector to store tools loaded from Markdown files
+        std::vector<std::unique_ptr<server_tool>> markdown_tools;
+
+        // First pass: Check for Markdown files and load their tools
         for (const auto & name : enabled_tools) {
             if (name == "all") continue;
+
+            // Check if the name is a valid Markdown file
+            bool is_markdown_file = std::filesystem::exists(name) &&
+                                    std::filesystem::is_regular_file(name) &&
+                                    (string_ends_with(name, ".md") || string_ends_with(name, ".markdown"));
+
+            if (is_markdown_file) {
+                try {
+                    auto file_tools = parse_markdown_tools(name);
+                    for (auto &t : file_tools) {
+                        markdown_tools.push_back(std::move(t));
+                        known_names.push_back(markdown_tools.back()->name); // Add to known_names
+                    }
+                } catch (const std::exception &e) {
+                    throw std::runtime_error(string_format(
+                        "Failed to load tools from Markdown file \"%s\": %s",
+                        name.c_str(), e.what()
+                    ));
+                }
+            }
+        }
+
+        // Second pass: Validate all requested tools (built-in or from Markdown)
+        for (const auto &name : enabled_tools) {
+            if (name == "all") continue;
+
+            // Skip validation for Markdown files (they are already handled)
+            bool is_markdown_file = std::filesystem::exists(name) &&
+                                    std::filesystem::is_regular_file(name) &&
+                                    (string_ends_with(name, ".md") || string_ends_with(name, ".markdown"));
+            if (is_markdown_file) {
+                continue; // Skip validation for files
+            }
+
+            // Validate built-in tools
             if (std::find(known_names.begin(), known_names.end(), name) == known_names.end()) {
                 throw std::runtime_error(string_format(
                     "unknown tool \"%s\". available tools: %s",
@@ -768,14 +987,21 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools) {
             }
         }
 
+        // Clear the tools vector and add built-in tools
         tools.clear();
         for (auto & t : all_tools) {
             if (enabled_set.count(t->name) > 0 || enabled_set.count("all") > 0) {
                 tools.push_back(std::move(t));
             }
         }
+
+        // Add tools from Markdown files
+        for (auto &t : markdown_tools) {
+            tools.push_back(std::move(t));
+        }
     }
 
+    // Set up HTTP handlers
     handle_get = [this](const server_http_req &) -> server_http_res_ptr {
         auto res = std::make_unique<server_http_res>();
         try {
