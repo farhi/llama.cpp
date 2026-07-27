@@ -3252,10 +3252,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_UI_MCP_PROXY"));
     add_opt(common_arg(
-        {"--tools"}, "TOOL1,TOOL2,...",
+        {"--tools"}, "TOOL1,TOOL2,/path/to/MD_file,...",
         "experimental: whether to enable built-in tools for AI agents - do not enable in untrusted environments (default: no tools)\n"
         "specify \"all\" to enable all tools\n"
-        "available tools: read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, get_datetime\n"
+        "specify Markdown files to read tools with lines such as \"**tool_name**: Description in free format with {argument} placeholders (command: `command to execute with {argument}`)\".\n"
+        "available tools: read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, get_datetime, /path/to/MD\n"
         "note: for security reasons, this will limit --cors-origins to localhost by default",
         [](common_params & params, const std::string & value) {
             params.server_tools = parse_csv_row(value);

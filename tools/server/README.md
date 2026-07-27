@@ -336,6 +336,11 @@ The server includes a set of built-in tools that enable the LLM to access the lo
 
 To use this feature, start the server with `--tools all`. You can also enable only specific tools by passing a comma-separated list: `--tools name1,name2,...`. Run `--help` for the full list of available tool names.
 
+Last, you can define tools from a free text Markdown file, with row entries such as:
+```
+**tool_name**: Description in free format with {argument} (command: `command to execute with {argument} placeholders`)
+```
+
 ## Build
 
 `llama-server` is built alongside everything else from the root of the project

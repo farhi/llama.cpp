@@ -1116,7 +1116,7 @@ static server_tool & find_tool(std::vector<std::unique_ptr<server_tool>> & tools
 
 
 //
-// server_tool_markdown_command: add a tool from a MD entry
+// server_tool_markdown_command: add tools from MD entries
 //
 // Markdown syntax, e.g. --tools TOOLS.md:
 //
