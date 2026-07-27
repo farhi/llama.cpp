@@ -1174,7 +1174,7 @@ static server_tool & find_tool(std::vector<std::unique_ptr<server_tool>> & tools
 
 
 //
-// server_tool_markdown_command: add tools from MD entries
+// server_tool_exec_command: add tools from MD entries
 //
 // Markdown syntax, e.g. --tools TOOLS.md:
 //
@@ -1226,11 +1226,11 @@ static std::vector<std::string> tokenize_command(const std::string& cmd) {
 }
 
 
-struct server_tool_markdown_command : server_tool {
+struct server_tool_exec_command : server_tool {
     std::string command_template;
     std::string description;
 
-    server_tool_markdown_command(const std::string &name, const std::string &description, const std::string &command)
+    server_tool_exec_command(const std::string &name, const std::string &description, const std::string &command)
         : command_template(command), description(description) {
         this->name = name;
         this->display_name = name;
@@ -1334,7 +1334,7 @@ std::vector<std::unique_ptr<server_tool>> parse_markdown_tools(const std::string
             std::string command = matches[3].str();
 
             tools.push_back(
-                std::make_unique<server_tool_markdown_command>(
+                std::make_unique<server_tool_exec_command>(
                     tool_name, description, command
                 )
             );
