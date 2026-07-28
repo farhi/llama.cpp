@@ -1174,12 +1174,27 @@ static server_tool & find_tool(std::vector<std::unique_ptr<server_tool>> & tools
 
 
 //
-// server_tool_exec_command: add tools from MD entries
+// server_tool_exec_command: add tools from JSON entries
 //
-// Markdown syntax, e.g. --tools TOOLS.md:
+// JSON syntax, e.g. --tools TOOLS.json
 //
-//  **list_files**: List all files in given {directory} (command: `ls {directory}`)
-//  **grep_text**: Search for text {pattern} in {file} (command: `grep "{pattern}" {file}`)
+//    [
+//      {
+//        "name": "get_ip",
+//        "description": "Get the public IP address of the server",
+//        "command": "curl ifconfig.me"
+//      },
+//      {
+//        "name": "list_files",
+//        "description": "List all files in a directory",
+//        "command": "ls -la {directory}"
+//      },
+//      {
+//        "name": "date_now",
+//        "description": "Get the current time",
+//        "command": "date"
+//      }
+//    ]
 
 // Helper: Tokenize a command string into arguments (respects quotes/backslashes)
 static std::vector<std::string> tokenize_command(const std::string& cmd) {
@@ -1316,35 +1331,41 @@ struct server_tool_exec_command : server_tool {
     }
 };
 
-std::vector<std::unique_ptr<server_tool>> parse_markdown_tools(const std::string &markdown_path) {
+// Helper: Reads tool definitions from a structured JSON file
+std::vector<std::unique_ptr<server_tool>> parse_json_tools(const std::string &json_path) {
     std::vector<std::unique_ptr<server_tool>> tools;
-    std::ifstream file(markdown_path);
+    std::ifstream file(json_path);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open Markdown file: " + markdown_path);
+        throw std::runtime_error("Failed to open JSON file: " + json_path);
     }
 
-    std::string line;
-    std::regex tool_regex("\\*\\*([^\\*]+)\\*\\*:\\s*(.+)\\s*\\(command:\\s*`([^`]+)`\\s*\\)");
+    json data = json::parse(file);
 
-    while (std::getline(file, line)) {
-        std::smatch matches;
-        if (std::regex_search(line, matches, tool_regex)) {
-            std::string tool_name = matches[1].str();
-            std::string description = matches[2].str();
-            std::string command = matches[3].str();
+    if (!data.is_array()) {
+        throw std::runtime_error("JSON root must be an array of tool definitions.");
+    }
+
+    for (const auto& tool_json : data) {
+        try {
+            std::string name = tool_json.at("name").get<std::string>();
+            std::string description = tool_json.at("description").get<std::string>();
+            std::string command = tool_json.at("command").get<std::string>();
 
             tools.push_back(
                 std::make_unique<server_tool_exec_command>(
-                    tool_name, description, command
+                    name, description, command
                 )
             );
+        } catch (const json::exception& e) {
+            throw std::runtime_error(string_format(
+                "Error parsing tool definition in JSON file %s: %s",
+                json_path.c_str(), e.what()
+            ));
         }
     }
 
     return tools;
 }
-
-
 
 //
 // public API
@@ -1379,43 +1400,43 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools,
             known_names.push_back(t->name);
         }
         
-        // Temporary vector to store tools loaded from Markdown files
-        std::vector<std::unique_ptr<server_tool>> markdown_tools;
+        // Temporary vector to store tools loaded from files
+        std::vector<std::unique_ptr<server_tool>> tools_from_files;
         
-        // First pass: Check for Markdown files and load their tools
+        // First pass: Check for JSON files and load their tools
         for (const auto & name : enabled_tools) {
             if (name == "all") continue;
 
-            // Check if the name is a valid Markdown file
-            bool is_markdown_file = std::filesystem::exists(name) &&
-                                    std::filesystem::is_regular_file(name) &&
-                                    (string_ends_with(name, ".md") || string_ends_with(name, ".markdown"));
+            // Check if the name is a valid JSON file
+            bool is_json_file = std::filesystem::exists(name) &&
+                                std::filesystem::is_regular_file(name) &&
+                                (string_ends_with(name, ".json") || string_ends_with(name, ".js"));
 
-            if (is_markdown_file) {
+            if (is_json_file) {
                 try {
-                    auto file_tools = parse_markdown_tools(name);
+                    auto file_tools = parse_json_tools(name); 
                     for (auto &t : file_tools) {
-                        markdown_tools.push_back(std::move(t));
-                        known_names.push_back(markdown_tools.back()->name); // Add to known_names
+                        tools_from_files.push_back(std::move(t));
+                        known_names.push_back(tools_from_files.back()->name); // Add to known_names
                     }
                 } catch (const std::exception &e) {
                     throw std::runtime_error(string_format(
-                        "Failed to load tools from Markdown file \"%s\": %s",
+                        "Failed to load tools from JSON file \"%s\": %s",
                         name.c_str(), e.what()
                     ));
                 }
-            }
+            } 
         }
 
         // Second pass: validate that every requested tool is known
         for (const auto & name : enabled_tools) {
             if (name == "all") continue;
             
-            // Skip validation for Markdown files (they are already handled)
-            bool is_markdown_file = std::filesystem::exists(name) &&
-                                    std::filesystem::is_regular_file(name) &&
-                                    (string_ends_with(name, ".md") || string_ends_with(name, ".markdown"));
-            if (is_markdown_file) {
+            // Skip validation for files (they are already handled)
+            bool is_json_file = std::filesystem::exists(name) &&
+                                std::filesystem::is_regular_file(name) &&
+                                (string_ends_with(name, ".json") || string_ends_with(name, ".js"));
+            if (is_json_file) {
                 continue; // Skip validation for files
             }
             
@@ -1434,8 +1455,8 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools,
             }
         }
         
-        // Add tools from Markdown files
-        for (auto &t : markdown_tools) {
+        // Add tools from files
+        for (auto &t : tools_from_files) {
             tools.push_back(std::move(t));
         }
     }

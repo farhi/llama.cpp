@@ -43,3 +43,5 @@ struct server_tools {
     server_http_context::handler_t handle_get;
     server_http_context::handler_t handle_post;
 };
+
+std::vector<std::unique_ptr<server_tool>> parse_json_tools(const std::string &json_path);
